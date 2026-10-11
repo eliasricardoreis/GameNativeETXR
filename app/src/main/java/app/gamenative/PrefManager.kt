@@ -1140,6 +1140,16 @@ object PrefManager {
             setPref(OPEN_WEB_LINKS_EXTERNALLY, value)
         }
 
+    // Treat this device as a headset even though it does not identify as one: a phone in a
+    // headset shell running a third-party OpenXR runtime has neither the head-tracking system
+    // feature nor a headset manufacturer string.
+    private val TREAT_AS_HEADSET = booleanPreferencesKey("treat_as_headset")
+    var treatAsHeadset: Boolean
+        get() = getPref(TREAT_AS_HEADSET, false)
+        set(value) {
+            setPref(TREAT_AS_HEADSET, value)
+        }
+
     // Whether to hide the Android status bar when not in a game (in game list, settings, etc.)
     private val HIDE_STATUS_BAR_WHEN_NOT_IN_GAME = booleanPreferencesKey("hide_status_bar_when_not_in_game")
     var hideStatusBarWhenNotInGame: Boolean

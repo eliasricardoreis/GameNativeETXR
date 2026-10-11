@@ -138,6 +138,7 @@ fun SettingsGroupInterface(
     val context = LocalContext.current
 
     var openWebLinks by rememberSaveable { mutableStateOf(PrefManager.openWebLinksExternally) }
+    var treatAsHeadset by rememberSaveable { mutableStateOf(PrefManager.treatAsHeadset) }
 
     var openAppThemeDialog by rememberSaveable { mutableStateOf(false) }
     var openAppPaletteDialog by rememberSaveable { mutableStateOf(false) }
@@ -304,6 +305,19 @@ fun SettingsGroupInterface(
                 PrefManager.openWebLinksExternally = it
             },
         )
+
+        if (BuildConfig.XR_BUILD) {
+            SettingsSwitch(
+                colors = settingsTileColorsAlt(),
+                title = { Text(text = stringResource(R.string.settings_interface_treat_as_headset_title)) },
+                subtitle = { Text(text = stringResource(R.string.settings_interface_treat_as_headset_subtitle)) },
+                state = treatAsHeadset,
+                onCheckedChange = {
+                    treatAsHeadset = it
+                    PrefManager.treatAsHeadset = it
+                },
+            )
+        }
 
         SettingsSwitch(
             colors = settingsTileColorsAlt(),

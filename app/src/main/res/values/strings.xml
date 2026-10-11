@@ -1154,6 +1154,8 @@
     <string name="settings_interface_title">Interface</string>
     <string name="settings_interface_external_links_title">Open web links externally</string>
     <string name="settings_interface_external_links_subtitle">Links open with your main web browser</string>
+    <string name="settings_interface_treat_as_headset_title">Treat this device as a headset</string>
+    <string name="settings_interface_treat_as_headset_subtitle">For a phone in a headset shell with its own OpenXR runtime. Enables Immersive mode and keeps the app in landscape. Takes effect after a restart.</string>
     <string name="settings_interface_hide_statusbar_title">Hide status bar when not in game</string>
     <string name="settings_interface_hide_statusbar_subtitle">Hide Android status bar in game list, settings, etc. App will restart when changed.</string>
     <string name="settings_interface_swap_face_buttons_title">Swap face buttons</string>

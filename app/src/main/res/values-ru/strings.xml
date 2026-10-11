@@ -1135,6 +1135,8 @@ https://gamenative.app
     <string name="settings_info_title">Информация</string>
     <string name="settings_interface_download_server_title">Сервер загрузки Steam</string>
     <string name="settings_interface_external_links_subtitle">Ссылки открываются с помощью вашего основного веб-браузера</string>
+    <string name="settings_interface_treat_as_headset_title">Считать устройство шлемом</string>
+    <string name="settings_interface_treat_as_headset_subtitle">Для телефона в корпусе шлема со своим OpenXR-рантаймом. Включает режим Immersive и держит приложение в альбомной ориентации. Применяется после перезапуска.</string>
     <string name="settings_interface_external_links_title">Открывать веб-ссылки извне</string>
     <string name="settings_interface_external_storage_subtitle">Сохранять игры на внешнее хранилище</string>
     <string name="settings_interface_external_storage_title">Запись на внешнее хранилище</string>

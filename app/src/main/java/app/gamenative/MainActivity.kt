@@ -87,7 +87,8 @@ class MainActivity : ComponentActivity() {
             context.packageManager.hasSystemFeature("android.hardware.vr.headtracking") ||
                 Build.MANUFACTURER.equals("Oculus", true) ||
                 Build.MANUFACTURER.equals("Meta", true) ||
-                Build.MANUFACTURER.equals("Pico", true)
+                Build.MANUFACTURER.equals("Pico", true) ||
+                (BuildConfig.XR_BUILD && PrefManager.treatAsHeadset)
 
         fun isMetaQuest(): Boolean =
             Build.MANUFACTURER.equals("Oculus", true) ||
