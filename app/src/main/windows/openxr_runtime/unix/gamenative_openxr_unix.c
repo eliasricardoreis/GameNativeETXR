@@ -36,7 +36,12 @@ enum gn_transport_kind {
     GN_TRANSPORT_UNKNOWN = 0,
     GN_TRANSPORT_AHARDWAREBUFFER = 1,
     GN_TRANSPORT_DMABUF = 2,
-    GN_TRANSPORT_RELAY = 3
+    GN_TRANSPORT_RELAY = 3,
+    /* The render image's memory is read back on the CPU and written into an
+     * AHardwareBuffer. For drivers whose vkGetMemoryFdKHR reports success and
+     * hands back no descriptor, which leaves every zero-copy path without a
+     * source. */
+    GN_TRANSPORT_CPU = 4
 };
 
 struct gn_transport_image {
@@ -70,6 +75,7 @@ struct gn_image {
     VkImage relay_source_image;
     VkDeviceMemory relay_source_memory;
     uint8_t submitted;
+    void *mapped;
 };
 
 struct gn_swapchain {
@@ -119,6 +125,8 @@ static PFN_vkWaitForFences p_vkWaitForFences;
 static PFN_vkGetFenceFdKHR p_vkGetFenceFdKHR;
 static PFN_vkQueueSubmit p_vkQueueSubmit;
 static PFN_vkQueueWaitIdle p_vkQueueWaitIdle;
+static PFN_vkMapMemory p_vkMapMemory;
+static PFN_vkUnmapMemory p_vkUnmapMemory;
 static PFN_vkCreateCommandPool p_vkCreateCommandPool;
 static PFN_vkDestroyCommandPool p_vkDestroyCommandPool;
 static PFN_vkAllocateCommandBuffers p_vkAllocateCommandBuffers;
@@ -449,6 +457,8 @@ static void load_vulkan_functions(void)
     LOAD_DEVICE(vkGetFenceFdKHR);
     LOAD_DEVICE(vkQueueSubmit);
     LOAD_DEVICE(vkQueueWaitIdle);
+    LOAD_DEVICE(vkMapMemory);
+    LOAD_DEVICE(vkUnmapMemory);
     LOAD_DEVICE(vkCreateCommandPool);
     LOAD_DEVICE(vkDestroyCommandPool);
     LOAD_DEVICE(vkAllocateCommandBuffers);
@@ -486,6 +496,22 @@ static int find_memory_type(uint32_t bits, VkMemoryPropertyFlags desired)
     }
     for (uint32_t i = 0; i < props.memoryTypeCount; ++i)
         if (bits & (1u << i)) return (int)i;
+    return -1;
+}
+
+/* Uncached host memory is write-combined on most mobile GPUs: fine to write,
+ * several times slower to read. Only an exact match counts here. */
+static int find_cached_memory_type(uint32_t bits)
+{
+    const VkMemoryPropertyFlags wanted =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+        VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    VkPhysicalDeviceMemoryProperties props;
+    p_vkGetPhysicalDeviceMemoryProperties(physical_device, &props);
+    for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
+        if ((bits & (1u << i)) &&
+            (props.memoryTypes[i].propertyFlags & wanted) == wanted) return (int)i;
+    }
     return -1;
 }
 
@@ -694,9 +720,11 @@ static int create_image(struct gn_swapchain *swapchain, struct gn_image *out,
 
 
 
-    int memory_type = find_memory_type(
-        requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    int memory_type = find_cached_memory_type(requirements.memoryTypeBits);
+    if (memory_type < 0)
+        memory_type = find_memory_type(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (memory_type < 0) {
         log_line("No compatible memory type for dma-buf image");
         goto fail;
@@ -741,6 +769,13 @@ static int create_image(struct gn_swapchain *swapchain, struct gn_image *out,
     if (result != VK_SUCCESS) {
         log_vk_result("vkGetMemoryFdKHR(dma-buf)", result);
         goto fail;
+    }
+    if (out->dma_buf_fd < 0) {
+        /* Seen with the Wrapper driver on Mali: the call succeeds and hands back
+         * nothing. The image is still a valid render target, so keep it and let
+         * the CPU transport read it back. */
+        log_line("vkGetMemoryFdKHR(dma-buf) succeeded without a descriptor; "
+                 "the render image cannot be exported");
     }
 
     out->plane_count = chosen_plane_count;
@@ -1743,6 +1778,7 @@ static void destroy_image(struct gn_image *image)
         r_vkFreeMemory(relay_device, image->relay_source_memory, NULL);
 #endif
     if (image->dma_buf_fd >= 0) close(image->dma_buf_fd);
+    if (image->mapped && image->memory && p_vkUnmapMemory) p_vkUnmapMemory(device, image->memory);
     if (image->image && p_vkDestroyImage) p_vkDestroyImage(device, image->image, NULL);
     if (image->memory && p_vkFreeMemory) p_vkFreeMemory(device, image->memory, NULL);
     memset(image, 0, sizeof(*image));
@@ -1799,6 +1835,131 @@ static int register_ahardwarebuffer(
 #endif
 }
 
+#if defined(__ANDROID__)
+/* CPU transport: one AHardwareBuffer per eye per swapchain image, registered with
+ * the compositor exactly like the zero-copy AHardwareBuffer transport, and filled
+ * by reading the render image's memory after the frame's fence has signalled. */
+static int cpu_register(uint32_t slot, uint32_t image_index, uint32_t eye)
+{
+    struct gn_swapchain *swapchain = &swapchains[slot];
+    struct gn_image *image = &swapchain->images[image_index];
+    struct gn_transport_image *transport = &image->transport[eye];
+    if (swapchain->sample_count != 1 || !image->memory || !p_vkMapMemory) return 0;
+
+    if (!image->mapped) {
+        VkResult result = p_vkMapMemory(device, image->memory, 0, VK_WHOLE_SIZE, 0, &image->mapped);
+        if (result != VK_SUCCESS || !image->mapped) {
+            image->mapped = NULL;
+            log_vk_result("vkMapMemory(cpu transport)", result);
+            return 0;
+        }
+    }
+
+    if (!transport->hardware_buffer) {
+        AHardwareBuffer_Desc descriptor = {
+            .width = swapchain->width,
+            .height = swapchain->height,
+            .layers = 1,
+            .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+            .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                     AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+        };
+        AHardwareBuffer *buffer = NULL;
+        if (AHardwareBuffer_allocate(&descriptor, &buffer) != 0 || !buffer) {
+            log_line("cpu transport: AHardwareBuffer allocation failed");
+            return 0;
+        }
+        transport->hardware_buffer = buffer;
+    }
+    if (transport->registered) return 1;
+
+    const uint32_t transport_index = slot * GN_UNIX_MAX_IMAGES + image_index;
+    const int swap_red_blue =
+        swapchain->format == VK_FORMAT_B8G8R8A8_UNORM ||
+        swapchain->format == VK_FORMAT_B8G8R8A8_SRGB;
+    char line[192], response[64] = {0};
+    snprintf(line, sizeof(line),
+             "BUFFER eye=%u index=%u w=%u h=%u swizzle=%u\n",
+             eye, transport_index, swapchain->width, swapchain->height,
+             swap_red_blue ? 1u : 0u);
+    if (!transact_line(line, response, sizeof(response)) ||
+        strncmp(response, "OK", 2) ||
+        AHardwareBuffer_sendHandleToUnixSocket(
+            (AHardwareBuffer *)transport->hardware_buffer, transport_fd) != 0 ||
+        !read_line(transport_fd, response, sizeof(response)) ||
+        strncmp(response, "OK", 2)) {
+        char trace[160];
+        snprintf(trace, sizeof(trace), "cpu transport: registration failed response=%s",
+                 response[0] ? response : "<none>");
+        log_line(trace);
+        close_transport();
+        return 0;
+    }
+    transport->registered = 1;
+    {
+        char trace[192];
+        snprintf(trace, sizeof(trace),
+                 "cpu transport registered eye=%u index=%u size=%ux%u swizzle=%u",
+                 eye, transport_index, swapchain->width, swapchain->height,
+                 swap_red_blue ? 1u : 0u);
+        log_line(trace);
+    }
+    return 1;
+}
+
+static int cpu_copy(const struct gn_swapchain *swapchain, const struct gn_image *image,
+                    struct gn_transport_image *transport, uint32_t array_index)
+{
+    if (!image->mapped || !transport->hardware_buffer) return 0;
+
+    VkImageSubresource subresource = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .mipLevel = 0,
+        .arrayLayer = array_index
+    };
+    VkSubresourceLayout layout;
+    p_vkGetImageSubresourceLayout(device, image->image, &subresource, &layout);
+
+    AHardwareBuffer *buffer = (AHardwareBuffer *)transport->hardware_buffer;
+    AHardwareBuffer_Desc descriptor;
+    AHardwareBuffer_describe(buffer, &descriptor);
+    void *target = NULL;
+    if (AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &target) != 0 ||
+        !target) {
+        static int reported;
+        if (!reported) { reported = 1; log_line("cpu transport: AHardwareBuffer_lock failed"); }
+        return 0;
+    }
+    const uint8_t *source = (const uint8_t *)image->mapped + layout.offset;
+    const size_t source_pitch = (size_t)layout.rowPitch;
+    const size_t target_pitch = (size_t)descriptor.stride * 4;
+    const size_t row = (size_t)swapchain->width * 4;
+    if (source_pitch == target_pitch) {
+        memcpy(target, source, source_pitch * (swapchain->height - 1) + row);
+    } else {
+        uint8_t *out = target;
+        for (uint32_t y = 0; y < swapchain->height; ++y) {
+            memcpy(out, source, row);
+            out += target_pitch;
+            source += source_pitch;
+        }
+    }
+    AHardwareBuffer_unlock(buffer, NULL);
+
+    static int announced;
+    if (!announced) {
+        char trace[200];
+        announced = 1;
+        snprintf(trace, sizeof(trace),
+                 "cpu transport: first copy layer=%u offset=%llu source_pitch=%zu target_pitch=%zu",
+                 array_index, (unsigned long long)layout.offset, source_pitch, target_pitch);
+        log_line(trace);
+    }
+    transport->initialized = 1;
+    return 1;
+}
+#endif
+
 static int register_image(uint32_t slot, uint32_t image_index, uint32_t eye,
                           uint32_t array_index)
 {
@@ -1825,8 +1986,21 @@ static int register_image(uint32_t slot, uint32_t image_index, uint32_t eye,
             return 1;
         }
         destroy_transport_image(&image->transport[eye]);
+        if (image->dma_buf_fd < 0) {
+            if (cpu_register(slot, image_index, eye)) {
+                image->transport_kind[eye] = GN_TRANSPORT_CPU;
+                image->registered_eye_mask |= bit;
+                image->registered_array_index[eye] = array_index;
+                return 1;
+            }
+            destroy_transport_image(&image->transport[eye]);
+        }
 #endif
         image->transport_kind[eye] = GN_TRANSPORT_DMABUF;
+    }
+    if (image->transport_kind[eye] == GN_TRANSPORT_CPU) {
+        image->registered_array_index[eye] = array_index;
+        return 1;
     }
     if (image->transport_kind[eye] == GN_TRANSPORT_RELAY) {
         if (image->registered_array_index[eye] != array_index) {
@@ -1844,7 +2018,16 @@ static int register_image(uint32_t slot, uint32_t image_index, uint32_t eye,
     }
 
     if (image->dma_buf_fd < 0) {
-        log_line("optimal render image has no dma-buf; AHardwareBuffer transport is required");
+        static int reported;
+        if (reported < 4) {
+            char trace[200];
+            snprintf(trace, sizeof(trace),
+                     "render image has no dma-buf and no other transport: "
+                     "slot=%u image=%u eye=%u",
+                     slot, image_index, eye);
+            log_line(trace);
+            ++reported;
+        }
         return 0;
     }
 
@@ -2418,6 +2601,13 @@ static int submit_views_transport(
             relay_commands[relay_count] = transport->command_buffer;
             relay_recorded[relay_count] = transport;
             ++relay_count;
+        }
+        if (image->transport_kind[view->eye] == GN_TRANSPORT_CPU) {
+            if (!cpu_copy(&swapchains[view->slot], image, &image->transport[view->eye],
+                          view->array_index)) {
+                pthread_mutex_unlock(&socket_mutex);
+                return 0;
+            }
         }
         if (image->transport_kind[view->eye] == GN_TRANSPORT_AHARDWAREBUFFER) {
             struct gn_transport_image *transport = &image->transport[view->eye];
