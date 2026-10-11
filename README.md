@@ -1,3 +1,22 @@
+> [!NOTE]
+> **This is the EnJoyTheXR fork of GameNative.**
+> [EnJoyTheXR](https://t.me/EnJoyTheVR) is mobile VR: a phone in a headset shell with its own
+> OpenXR runtime. This fork carries the changes GameNative needs to run in VR on such a phone,
+> including Windows VR games from Steam. News and builds: **https://t.me/EnJoyTheVR**
+>
+> Это форк GameNative для EnJoyTheXR — мобильного VR на телефоне. Новости и сборки:
+> **https://t.me/EnJoyTheVR**
+>
+> It is not the official GameNative and is not supported by its authors: the download, Discord
+> and Ko-fi links below belong to the [upstream project](https://github.com/utkarshdalal/GameNative).
+> Problems with this fork go to this repository's issues, not upstream.
+>
+> What differs from upstream, on the `etxr/*` branches:
+> - a setting to treat the device as a headset, so Immersive mode is available on a phone;
+> - a CPU frame transport in the Windows VR bridge, for GPUs whose driver cannot export the
+>   render image (seen on Mali-G720 through the Wrapper driver);
+> - a clear error when Windows VR is started on Wine or Proton older than 10.
+
 <div align="center">
 
 # GameNative
