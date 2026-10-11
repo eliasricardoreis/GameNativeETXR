@@ -39,6 +39,13 @@ class WindowsVrRuntimeService(context: Context) : Closeable {
             check(container.wineVersion.contains("arm64ec", ignoreCase = true)) {
                 "Windows VR requires a supported ARM64EC Wine or Proton build"
             }
+            // The Unix bridge reads the host Vulkan handles out of winevulkan's client objects
+            // and only knows the layout Wine 10 introduced. On an older build the device handle
+            // does not resolve and xrCreateSession fails with "DXVK native interop failed".
+            val wineMajor = wineMajorVersion(container.wineVersion)
+            check(wineMajor == null || wineMajor >= 10) {
+                "Windows VR requires Wine or Proton 10 or newer (this container uses ${container.wineVersion})"
+            }
             check(container.dxWrapper.contains("dxvk", ignoreCase = true)) {
                 "Windows VR D3D11 requires DXVK native interop"
             }
@@ -200,6 +207,10 @@ class WindowsVrRuntimeService(context: Context) : Closeable {
             File(applicationContext.getExternalFilesDir(null), "wine_logs/wine_debug.log"),
         )
     }
+
+    /** Major version out of an identifier such as "proton-10.0-4-arm64ec-1"; null if it has none. */
+    private fun wineMajorVersion(identifier: String): Int? =
+        Regex("""^[A-Za-z]+-(\d+)\.""").find(identifier)?.groupValues?.get(1)?.toIntOrNull()
 
     private fun payloadSummary(directory: File): String = buildString {
         append("directory=${directory.path}")
