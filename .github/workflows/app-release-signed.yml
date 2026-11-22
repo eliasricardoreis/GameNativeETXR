@@ -20,6 +20,10 @@ on:
         description: "Aplicar a pasta mods/ (patches, overlay, run.sh) antes de compilar"
         type: boolean
         default: true
+      submodules:
+        description: "Baixar submódulos (best-effort; alguns links estão mortos)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,8 +39,18 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
+
+    # O CI original não baixa submódulos. Alguns estão quebrados (ex.: PancakeTAS/dxbc não existe mais),
+    # então por padrão ficam de fora. Só ligue se o build reclamar de arquivos nativos faltando.
+    - name: Submódulos (opcional)
+      env:
+        SUBS: ${{ inputs.submodules }}
+      run: |
+        if [ "${SUBS:-false}" = "true" ]; then
+          git submodule update --init --recursive || echo "::warning::Alguns submódulos falharam (ex.: PancakeTAS/dxbc)"
+        else
+          echo "Sem submódulos (igual ao CI original)."
+        fi
 
     - name: Add swap
       run: |

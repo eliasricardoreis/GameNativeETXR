@@ -1,0 +1,122 @@
+# Coloque em .github/workflows/build-etxr.yml de um repositório SEU (pode ser vazio ou o próprio fork).
+# Ele baixa o código direto do GitHub (não precisa de DownGit), aplica suas modificações,
+# instala o Android SDK, compila e entrega o APK em Actions > run > Artifacts.
+name: build-etxr
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "Repositório a compilar (dono/nome)"
+        default: "Zhes-20/GameNativeETXR"
+      target_ref:
+        description: "Branch, tag ou commit"
+        default: "etxr/1.2.1"
+      gradle_task:
+        description: "Tarefa do Gradle"
+        default: "assembleDebug"
+      jdk:
+        description: "Versão do JDK"
+        default: "17"
+      sdk_packages:
+        description: "Pacotes do Android SDK"
+        default: "platform-tools platforms;android-35 build-tools;35.0.0"
+      apply_mods:
+        description: "Aplicar a pasta mods/ por cima do código"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # 1) Este repositório (onde ficam o workflow e a pasta mods/)
+      - name: Baixar repositório das modificações
+        uses: actions/checkout@v4
+
+      # 2) O código a compilar, em ./src (sem submódulos: alguns links estão mortos e o CI original também não os baixa)
+      - name: Baixar código-fonte
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          ref: ${{ inputs.target_ref }}
+          path: src
+          submodules: false
+          fetch-depth: 1
+
+      # 3) Mudar / criar código. Ordem: patches/*.patch, depois overlay/, depois run.sh
+      #    mods/patches/*.patch  -> diffs (git diff) aplicados em ordem alfabética
+      #    mods/overlay/...      -> arquivos novos ou substitutos, mesmo caminho do projeto
+      #    mods/run.sh           -> edições livres (sed, python, etc.), roda dentro de ./src
+      - name: Aplicar modificações
+        if: ${{ inputs.apply_mods }}
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODS="$GITHUB_WORKSPACE/mods"
+          if [ ! -d "$MODS" ]; then echo "Sem pasta mods/, compilando o código original."; exit 0; fi
+          if [ -d "$MODS/patches" ]; then
+            for p in $(ls "$MODS"/patches/*.patch 2>/dev/null | sort); do
+              echo "== patch: $p"
+              git apply --verbose --whitespace=nowarn "$p"
+            done
+          fi
+          if [ -d "$MODS/overlay" ]; then
+            echo "== overlay"
+            cp -rv "$MODS/overlay/." .
+          fi
+          if [ -f "$MODS/run.sh" ]; then
+            echo "== run.sh"
+            bash "$MODS/run.sh"
+          fi
+          git status --short | head -50
+
+      # 4) Java + Android SDK (baixa e aceita as licenças)
+      - name: Instalar JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.jdk }}
+
+      - name: Instalar Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ${{ inputs.sdk_packages }}
+
+      - name: Cache do Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Chave opcional de artes (SteamGridDB); sem ela o app compila igual
+      - name: Configurar local.properties
+        working-directory: src
+        env:
+          SGDB: ${{ secrets.STEAMGRIDDB_API_KEY }}
+        run: |
+          if [ -n "${SGDB:-}" ]; then echo "STEAMGRIDDB_API_KEY=$SGDB" >> local.properties; fi
+
+      # 5) Compilar
+      - name: Compilar
+        working-directory: src
+        run: |
+          chmod +x gradlew
+          ./gradlew ${{ inputs.gradle_task }} --stacktrace --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g"
+
+      - name: Reunir APKs
+        run: |
+          mkdir -p out
+          find src -path "*build/outputs/apk*" -name "*.apk" -exec cp -v {} out/ \;
+          ls -lh out
+          test -n "$(ls -A out)"
+
+      - name: Enviar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: out/*.apk
+          retention-days: 14
