@@ -127,14 +127,21 @@ jobs:
           echo "SIGN_ALIAS=$ALIAS"; echo "SIGN_KEY_PASS=$KPASS"; echo "SIGN_STORE_PASS=$SPASS"
         } >> "$GITHUB_ENV"
 
+    # Só escreve a chave se o secret existir. Valor vazio no local.properties gera
+    # "String X = ;" no BuildConfig e o javac quebra; sem a linha, o Gradle usa o padrão do projeto.
     - name: Inject credentials
+      env:
+        POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+        POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+        STEAMGRIDDB_API_KEY: ${{ secrets.STEAMGRIDDB_API_KEY }}
+        CLOUD_PROJECT_NUMBER: ${{ secrets.CLOUD_PROJECT_NUMBER }}
       run: |
-        {
-          echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
-          echo "POSTHOG_HOST=${{ secrets.POSTHOG_HOST }}"
-          echo "STEAMGRIDDB_API_KEY=${{ secrets.STEAMGRIDDB_API_KEY }}"
-          echo "CLOUD_PROJECT_NUMBER=${{ secrets.CLOUD_PROJECT_NUMBER }}"
-        } > local.properties
+        : > local.properties
+        for k in POSTHOG_API_KEY POSTHOG_HOST STEAMGRIDDB_API_KEY CLOUD_PROJECT_NUMBER; do
+          v="${!k:-}"
+          if [ -n "$v" ]; then echo "$k=$v" >> local.properties; fi
+        done
+        echo "local.properties:"; sed 's/=.*/=***/' local.properties || true
 
     - name: Install Android SDK Build Tools
       run: |
